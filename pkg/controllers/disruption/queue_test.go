@@ -37,6 +37,7 @@ import (
 	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/controllers/disruption"
 	disruptionevents "sigs.k8s.io/karpenter/pkg/controllers/disruption/events"
+	"sigs.k8s.io/karpenter/pkg/operator/options"
 	"sigs.k8s.io/karpenter/pkg/test"
 	. "sigs.k8s.io/karpenter/pkg/test/expectations"
 )
@@ -425,7 +426,7 @@ var _ = Describe("Queue", func() {
 						q.ProviderIDToCommand[strconv.Itoa(i)] = &disruption.Command{}
 					}
 					q.Unlock()
-					actualDuration := q.GetMaxRetryDuration()
+					actualDuration := q.GetMaxRetryDuration(ctx)
 					Expect(actualDuration).To(Equal(expectedDuration))
 				},
 				Entry("very small queue - 100 commands", 100, 10*time.Minute),                  // max(100*80ms, 10min) = 10min
@@ -434,6 +435,23 @@ var _ = Describe("Queue", func() {
 				Entry("large queue - 40000 commands", 40000, 53*time.Minute+20*time.Second),    // 40000*80ms = 53min 20sec
 				Entry("very large queue - 80000 commands (capped)", 80000, 1*time.Hour),        // min(80000*80ms, 1hr) = 1hr
 				Entry("extremely large queue - 100000 commands (capped)", 100000, 1*time.Hour), // min(100000*80ms, 1hr) = 1hr
+			)
+			DescribeTable("should use the configured disruption replacement timeout as the minimum",
+				func(timeout time.Duration, numCommands int, expectedDuration time.Duration) {
+					ctx = options.ToContext(ctx, test.Options(test.OptionsFields{DisruptionReplacementTimeout: new(timeout)}))
+					q := disruption.NewQueue(env.Client, recorder, cluster, env.Clock, prov)
+					q.Lock()
+					for i := range numCommands {
+						q.ProviderIDToCommand[strconv.Itoa(i)] = &disruption.Command{}
+					}
+					q.Unlock()
+					Expect(q.GetMaxRetryDuration(ctx)).To(Equal(expectedDuration))
+				},
+				Entry("raised minimum, small queue", 20*time.Minute, 100, 20*time.Minute),                           // max(100*80ms, 20min) = 20min
+				Entry("raised minimum, queue scales past it", 20*time.Minute, 20000, 26*time.Minute+40*time.Second), // 20000*80ms = 26min 40sec
+				Entry("raised minimum, still capped at 1 hour", 20*time.Minute, 100000, 1*time.Hour),                // min(100000*80ms, 1hr) = 1hr
+				Entry("minimum above 1 hour raises the cap", 2*time.Hour, 100000, 2*time.Hour),                      // max(min(100000*80ms, 1hr), 2hr) = 2hr
+				Entry("lowered minimum, small queue", 2*time.Minute, 100, 2*time.Minute),                            // max(100*80ms, 2min) = 2min
 			)
 		})
 	})
